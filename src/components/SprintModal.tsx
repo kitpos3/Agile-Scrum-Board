@@ -1,7 +1,6 @@
 import { useState, FormEvent } from "react";
-import { User } from "firebase/auth";
-import { addDoc, collection, doc, updateDoc, serverTimestamp } from "firebase/firestore";
-import { db, handleFirestoreError, OperationType } from "../firebase";
+import { User } from "@supabase/supabase-js";
+import { supabase } from "../supabase";
 import { X, Loader2 } from "lucide-react";
 
 interface SprintModalProps {
@@ -13,7 +12,7 @@ interface SprintModalProps {
 export default function SprintModal({ user, sprint, onClose }: SprintModalProps) {
   const [name, setName] = useState(sprint?.name || "");
   const [goal, setGoal] = useState(sprint?.goal || "");
-  const [velocityTarget, setVelocityTarget] = useState<number>(sprint?.velocityTarget || 0);
+  const [velocityTarget, setVelocityTarget] = useState<number>(sprint?.velocity_target || 0);
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e: FormEvent) => {
@@ -25,28 +24,32 @@ export default function SprintModal({ user, sprint, onClose }: SprintModalProps)
       const sprintData = {
         name: name.trim(),
         goal: goal.trim(),
-        velocityTarget: Number(velocityTarget),
-        ownerId: user.uid,
+        velocity_target: Number(velocityTarget),
+        owner_id: user.id,
       };
 
       if (sprint?.id) {
-        await updateDoc(doc(db, "sprints", sprint.id), sprintData);
+        const { error } = await supabase
+          .from("sprints")
+          .update(sprintData)
+          .eq("id", sprint.id);
+        if (error) throw error;
       } else {
-        await addDoc(collection(db, "sprints"), {
-          ...sprintData,
-          createdAt: serverTimestamp(),
-        });
+        const { error } = await supabase
+          .from("sprints")
+          .insert(sprintData);
+        if (error) throw error;
       }
       onClose();
     } catch (error) {
-      handleFirestoreError(error, sprint?.id ? OperationType.UPDATE : OperationType.CREATE, sprint?.id ? `sprints/${sprint.id}` : "sprints");
+      console.error("Error saving sprint:", error);
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div 
+    <div
       className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 font-mono text-[#e0e0ee]"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
@@ -61,7 +64,7 @@ export default function SprintModal({ user, sprint, onClose }: SprintModalProps)
             <X className="w-5 h-5" />
           </button>
         </div>
-        
+
         <form onSubmit={handleSubmit} className="p-5 space-y-4">
           <div>
             <label className="block text-xs uppercase tracking-wider text-[#777799] mb-1.5 font-semibold">Sprint Name *</label>
@@ -75,7 +78,7 @@ export default function SprintModal({ user, sprint, onClose }: SprintModalProps)
               maxLength={100}
             />
           </div>
-          
+
           <div>
             <label className="block text-xs uppercase tracking-wider text-[#777799] mb-1.5 font-semibold">Sprint Goal</label>
             <textarea
@@ -86,7 +89,7 @@ export default function SprintModal({ user, sprint, onClose }: SprintModalProps)
               maxLength={500}
             />
           </div>
-          
+
           <div>
             <label className="block text-xs uppercase tracking-wider text-[#777799] mb-1.5 font-semibold">Velocity Target (SP)</label>
             <input

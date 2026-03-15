@@ -1,7 +1,6 @@
 import { useState, useEffect, FormEvent, useRef } from "react";
-import { User } from "firebase/auth";
-import { collection, query, where, onSnapshot, addDoc, deleteDoc, doc, serverTimestamp, orderBy } from "firebase/firestore";
-import { db, handleFirestoreError, OperationType } from "../firebase";
+import { User } from "@supabase/supabase-js";
+import { supabase } from "../supabase";
 import { Loader2, Send, Trash2, Image as ImageIcon } from "lucide-react";
 import ConfirmModal from "./ConfirmModal";
 import Markdown, { defaultUrlTransform } from "react-markdown";
@@ -92,24 +91,34 @@ export default function CommentsSection({ user, taskId, activeDeveloper }: Comme
     }
   };
 
+  const fetchComments = async () => {
+    const { data, error } = await supabase
+      .from("comments")
+      .select("*")
+      .eq("task_id", taskId)
+      .order("created_at", { ascending: true });
+    if (error) {
+      console.error("Error fetching comments:", error);
+    } else {
+      setComments(data || []);
+    }
+    setLoading(false);
+  };
+
   useEffect(() => {
     if (!taskId) return;
+    fetchComments();
 
-    const q = query(
-      collection(db, "comments"),
-      where("taskId", "==", taskId),
-      orderBy("createdAt", "asc")
-    );
+    const channel = supabase
+      .channel(`comments-${taskId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "comments", filter: `task_id=eq.${taskId}` }, () => {
+        fetchComments();
+      })
+      .subscribe();
 
-    const unsub = onSnapshot(q, (snapshot) => {
-      setComments(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-      setLoading(false);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, "comments");
-      setLoading(false);
-    });
-
-    return () => unsub();
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [taskId]);
 
   const handleSubmit = async (e: FormEvent) => {
@@ -118,17 +127,17 @@ export default function CommentsSection({ user, taskId, activeDeveloper }: Comme
 
     setSubmitting(true);
     try {
-      await addDoc(collection(db, "comments"), {
-        taskId,
+      const { error } = await supabase.from("comments").insert({
+        task_id: taskId,
         text: newComment.trim(),
-        authorId: user.uid,
-        authorName: activeDeveloper?.name || user.displayName || user.email || "Unknown User",
-        authorPhotoUrl: user.photoURL || "",
-        createdAt: serverTimestamp(),
+        author_id: user.id,
+        author_name: activeDeveloper?.name || user.user_metadata?.full_name || user.email || "Unknown User",
+        author_photo_url: user.user_metadata?.avatar_url || "",
       });
+      if (error) throw error;
       setNewComment("");
     } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, "comments");
+      console.error("Error adding comment:", error);
     } finally {
       setSubmitting(false);
     }
@@ -141,9 +150,10 @@ export default function CommentsSection({ user, taskId, activeDeveloper }: Comme
   const confirmDelete = async () => {
     if (!confirmModal) return;
     try {
-      await deleteDoc(doc(db, "comments", confirmModal.commentId));
+      const { error } = await supabase.from("comments").delete().eq("id", confirmModal.commentId);
+      if (error) throw error;
     } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `comments/${confirmModal.commentId}`);
+      console.error("Error deleting comment:", error);
     } finally {
       setConfirmModal(null);
     }
@@ -156,7 +166,7 @@ export default function CommentsSection({ user, taskId, activeDeveloper }: Comme
   return (
     <div className="border-t border-[#1a1a30] pt-5">
       <h3 className="text-sm font-bold font-sans tracking-tight text-white mb-4">Comments</h3>
-      
+
       <div className="space-y-4 mb-4 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
         {comments.length === 0 ? (
           <p className="text-xs text-[#777799] italic">No comments yet.</p>
@@ -164,23 +174,23 @@ export default function CommentsSection({ user, taskId, activeDeveloper }: Comme
           comments.map(comment => (
             <div key={comment.id} className="bg-[#1a1a30] rounded-lg p-3 relative group">
               <div className="flex items-center gap-2 mb-2">
-                {comment.authorPhotoUrl ? (
-                  <img src={comment.authorPhotoUrl} alt={comment.authorName} className="w-5 h-5 rounded-full" referrerPolicy="no-referrer" />
+                {comment.author_photo_url ? (
+                  <img src={comment.author_photo_url} alt={comment.author_name} className="w-5 h-5 rounded-full" referrerPolicy="no-referrer" />
                 ) : (
                   <div className="w-5 h-5 rounded-full bg-[#2a2a44] flex items-center justify-center text-[10px] text-white font-bold">
-                    {comment.authorName.charAt(0).toUpperCase()}
+                    {comment.author_name?.charAt(0).toUpperCase() || "?"}
                   </div>
                 )}
-                <span className="text-xs font-semibold text-[#aaaacc]">{comment.authorName}</span>
+                <span className="text-xs font-semibold text-[#aaaacc]">{comment.author_name}</span>
                 <span className="text-[10px] text-[#555566]">
-                  {comment.createdAt?.toDate ? comment.createdAt.toDate().toLocaleString() : 'Just now'}
+                  {comment.created_at ? new Date(comment.created_at).toLocaleString() : 'Just now'}
                 </span>
               </div>
               <div className="text-sm text-[#e0e0ee] whitespace-pre-wrap break-words prose prose-invert prose-sm max-w-none prose-a:text-[#5b9ff9] prose-img:rounded-lg prose-img:max-h-60">
                 <Markdown remarkPlugins={[remarkGfm]} urlTransform={customUrlTransform}>{comment.text}</Markdown>
               </div>
-              
-              {comment.authorId === user.uid && (
+
+              {comment.author_id === user.id && (
                 <button
                   onClick={() => handleDelete(comment.id)}
                   className="absolute top-3 right-3 text-[#777799] hover:text-[#ff6b6b] opacity-0 group-hover:opacity-100 transition-opacity"
@@ -210,10 +220,10 @@ export default function CommentsSection({ user, taskId, activeDeveloper }: Comme
               }
             }}
           />
-          <input 
-            type="file" 
-            accept="image/*" 
-            className="hidden" 
+          <input
+            type="file"
+            accept="image/*"
+            className="hidden"
             ref={fileInputRef}
             onChange={(e) => {
               const file = e.target.files?.[0];

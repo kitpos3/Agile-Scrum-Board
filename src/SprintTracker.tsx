@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
-import { User } from "firebase/auth";
-import { collection, query, where, onSnapshot, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, orderBy } from "firebase/firestore";
-import { db, handleFirestoreError, OperationType } from "./firebase";
+import { User } from "@supabase/supabase-js";
+import { supabase } from "./supabase";
 import { Plus, Edit2, Trash2, Loader2 } from "lucide-react";
 import SprintModal from "./components/SprintModal";
 import TaskModal from "./components/TaskModal";
@@ -9,17 +8,17 @@ import ConfirmModal from "./components/ConfirmModal";
 
 const STATUS_ORDER = ["Backlog", "To Do", "In Progress", "Code Review", "Testing", "Done"];
 const STATUS_CONFIG: Record<string, any> = {
-  Backlog:     { bg: "#1e1e2e", text: "#888899", dot: "#555566" },
-  "To Do":     { bg: "#172032", text: "#5b9ff9", dot: "#3b7ddb" },
+  Backlog: { bg: "#1e1e2e", text: "#888899", dot: "#555566" },
+  "To Do": { bg: "#172032", text: "#5b9ff9", dot: "#3b7ddb" },
   "In Progress": { bg: "#2a1f0e", text: "#f0a830", dot: "#d4922a" },
   "Code Review": { bg: "#251530", text: "#c77dff", dot: "#a855f7" },
-  Testing:     { bg: "#1a2520", text: "#4ade80", dot: "#22c55e" },
-  Done:        { bg: "#0e2018", text: "#22c55e", dot: "#16a34a" },
+  Testing: { bg: "#1a2520", text: "#4ade80", dot: "#22c55e" },
+  Done: { bg: "#0e2018", text: "#22c55e", dot: "#16a34a" },
 };
 const PRIORITY_CONFIG: Record<string, any> = {
-  High:   { color: "#ff6b6b", icon: "▲" },
+  High: { color: "#ff6b6b", icon: "▲" },
   Medium: { color: "#f0a830", icon: "◆" },
-  Low:    { color: "#4ade80", icon: "▼" },
+  Low: { color: "#4ade80", icon: "▼" },
 };
 
 export default function SprintTracker({ user }: { user: User }) {
@@ -28,7 +27,7 @@ export default function SprintTracker({ user }: { user: User }) {
   const [developers, setDevelopers] = useState<any[]>([]);
   const [selectedSprintId, setSelectedSprintId] = useState<string | null>(null);
   const [activeDeveloperId, setActiveDeveloperId] = useState<string | null>(null);
-  
+
   const [filterStatus, setFilterStatus] = useState("All");
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [isDevDropdownOpen, setIsDevDropdownOpen] = useState(false);
@@ -44,45 +43,86 @@ export default function SprintTracker({ user }: { user: User }) {
   const [newDevName, setNewDevName] = useState("");
   const [isAddingDev, setIsAddingDev] = useState(false);
 
+  // Fetch sprints
+  const fetchSprints = async () => {
+    const { data, error } = await supabase
+      .from("sprints")
+      .select("*")
+      .eq("owner_id", user.id)
+      .order("created_at", { ascending: false });
+    if (error) { console.error("Error fetching sprints:", error); setLoading(false); return; }
+    setSprints(data || []);
+    if (data && data.length > 0 && !selectedSprintId) {
+      setSelectedSprintId(data[0].id);
+    }
+    setLoading(false);
+  };
+
+  // Fetch developers
+  const fetchDevelopers = async () => {
+    const { data, error } = await supabase
+      .from("developers")
+      .select("*")
+      .eq("owner_id", user.id)
+      .order("created_at", { ascending: true });
+    if (error) { console.error("Error fetching developers:", error); return; }
+
+    setDevelopers(data || []);
+  };
+
+  // Fetch tasks for selected sprint
+  const fetchTasks = async () => {
+    if (!selectedSprintId) return;
+    const { data, error } = await supabase
+      .from("tasks")
+      .select("*")
+      .eq("sprint_id", selectedSprintId)
+      .eq("owner_id", user.id)
+      .order("created_at", { ascending: false });
+    if (error) { console.error("Error fetching tasks:", error); return; }
+    setTasks(data || []);
+  };
+
   useEffect(() => {
     if (!user) return;
-    const qSprints = query(collection(db, "sprints"), where("ownerId", "==", user.uid), orderBy("createdAt", "desc"));
-    const unsubSprints = onSnapshot(qSprints, (snapshot) => {
-      const spData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setSprints(spData);
-      if (spData.length > 0 && !selectedSprintId) {
-        setSelectedSprintId(spData[0].id);
-      }
-      setLoading(false);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, "sprints");
-      setLoading(false);
-    });
+    fetchSprints();
+    fetchDevelopers();
 
-    const qDevs = query(collection(db, "developers"), where("ownerId", "==", user.uid), orderBy("createdAt", "asc"));
-    const unsubDevs = onSnapshot(qDevs, (snapshot) => {
-      const devData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setDevelopers(devData);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, "developers");
-    });
+    // Realtime subscriptions
+    const sprintChannel = supabase
+      .channel("sprints-changes")
+      .on("postgres_changes", { event: "*", schema: "public", table: "sprints", filter: `owner_id=eq.${user.id}` }, () => {
+        fetchSprints();
+      })
+      .subscribe();
+
+    const devChannel = supabase
+      .channel("developers-changes")
+      .on("postgres_changes", { event: "*", schema: "public", table: "developers", filter: `owner_id=eq.${user.id}` }, () => {
+        fetchDevelopers();
+      })
+      .subscribe();
 
     return () => {
-      unsubSprints();
-      unsubDevs();
+      supabase.removeChannel(sprintChannel);
+      supabase.removeChannel(devChannel);
     };
   }, [user]);
 
   useEffect(() => {
     if (!user || !selectedSprintId) return;
-    const qTasks = query(collection(db, "tasks"), where("sprintId", "==", selectedSprintId), where("ownerId", "==", user.uid), orderBy("createdAt", "desc"));
-    const unsubTasks = onSnapshot(qTasks, (snapshot) => {
-      setTasks(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, "tasks");
-    });
+    fetchTasks();
 
-    return () => unsubTasks();
+    const taskChannel = supabase
+      .channel(`tasks-changes-${selectedSprintId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "tasks", filter: `sprint_id=eq.${selectedSprintId}` }, () => {
+        fetchTasks();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(taskChannel);
+    };
   }, [user, selectedSprintId]);
 
   useEffect(() => {
@@ -108,11 +148,8 @@ export default function SprintTracker({ user }: { user: User }) {
       title: "Delete Task",
       message: "Are you sure you want to delete this task?",
       onConfirm: async () => {
-        try {
-          await deleteDoc(doc(db, "tasks", taskId));
-        } catch (error) {
-          handleFirestoreError(error, OperationType.DELETE, `tasks/${taskId}`);
-        }
+        const { error } = await supabase.from("tasks").delete().eq("id", taskId);
+        if (error) console.error("Error deleting task:", error);
         setConfirmModal(null);
       }
     });
@@ -122,15 +159,12 @@ export default function SprintTracker({ user }: { user: User }) {
     setConfirmModal({
       isOpen: true,
       title: "Delete Sprint",
-      message: "Are you sure you want to delete this sprint? All associated tasks will remain but be orphaned.",
+      message: "Are you sure you want to delete this sprint? All associated tasks will also be deleted.",
       onConfirm: async () => {
-        try {
-          await deleteDoc(doc(db, "sprints", sprintId));
-          if (selectedSprintId === sprintId) {
-            setSelectedSprintId(sprints.find(s => s.id !== sprintId)?.id || null);
-          }
-        } catch (error) {
-          handleFirestoreError(error, OperationType.DELETE, `sprints/${sprintId}`);
+        const { error } = await supabase.from("sprints").delete().eq("id", sprintId);
+        if (error) console.error("Error deleting sprint:", error);
+        if (selectedSprintId === sprintId) {
+          setSelectedSprintId(sprints.find(s => s.id !== sprintId)?.id || null);
         }
         setConfirmModal(null);
       }
@@ -140,17 +174,13 @@ export default function SprintTracker({ user }: { user: User }) {
   const handleAddDeveloper = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newDevName.trim()) return;
-    try {
-      await addDoc(collection(db, "developers"), {
-        name: newDevName.trim(),
-        ownerId: user.uid,
-        createdAt: serverTimestamp(),
-      });
-      setNewDevName("");
-      setIsAddingDev(false);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, "developers");
-    }
+    const { error } = await supabase.from("developers").insert({
+      name: newDevName.trim(),
+      owner_id: user.id,
+    });
+    if (error) console.error("Error adding developer:", error);
+    setNewDevName("");
+    setIsAddingDev(false);
   };
 
   if (loading) {
@@ -169,7 +199,7 @@ export default function SprintTracker({ user }: { user: User }) {
       if (aIsActive && !bIsActive) return -1;
       if (!aIsActive && bIsActive) return 1;
     }
-    return 0; // Keep original order (createdAt desc) otherwise
+    return 0;
   });
 
   const totalSP = tasks.reduce((s, t) => s + (Number(t.sp) || 0), 0);
@@ -232,7 +262,7 @@ export default function SprintTracker({ user }: { user: User }) {
             >
               <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#c77dff", display: "inline-block" }} />
-                {activeDeveloper?.name || "Select User"} 
+                {activeDeveloper?.name || "Select User"}
               </span>
               <span style={{ fontSize: 10, color: "#555577", transform: isDevDropdownOpen ? "rotate(180deg)" : "rotate(0)", transition: "transform 0.2s" }}>▼</span>
             </button>
@@ -261,14 +291,14 @@ export default function SprintTracker({ user }: { user: User }) {
                     <div style={{ fontSize: 13, fontWeight: 600, color: d.id === activeDeveloperId ? "#c77dff" : "#ccc", fontFamily: "'Space Grotesk', sans-serif" }}>{d.name}</div>
                   </div>
                 ))}
-                
+
                 {/* Add New Developer */}
                 <div style={{ padding: "10px 16px", borderTop: "1px solid #2a2a44", background: "#0a0a12" }}>
                   {isAddingDev ? (
                     <form onSubmit={handleAddDeveloper} className="flex gap-2">
-                      <input 
+                      <input
                         autoFocus
-                        type="text" 
+                        type="text"
                         value={newDevName}
                         onChange={(e) => setNewDevName(e.target.value)}
                         placeholder="Name..."
@@ -277,7 +307,7 @@ export default function SprintTracker({ user }: { user: User }) {
                       <button type="submit" className="text-xs bg-[#c77dff] text-black px-2 py-1 rounded font-bold">Add</button>
                     </form>
                   ) : (
-                    <button 
+                    <button
                       onClick={(e) => { e.stopPropagation(); setIsAddingDev(true); }}
                       className="text-xs text-[#c77dff] hover:text-white flex items-center gap-1 font-bold w-full"
                     >
@@ -325,7 +355,7 @@ export default function SprintTracker({ user }: { user: User }) {
               >
                 <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#5b9ff9", display: "inline-block" }} />
-                  {currentSprint?.name || "Select Sprint"} 
+                  {currentSprint?.name || "Select Sprint"}
                 </span>
                 <span style={{ fontSize: 10, color: "#555577", transform: isDropdownOpen ? "rotate(180deg)" : "rotate(0)", transition: "transform 0.2s" }}>▼</span>
               </button>
@@ -382,7 +412,7 @@ export default function SprintTracker({ user }: { user: User }) {
           {/* ──── STATS ──── */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, padding: "0 28px", marginBottom: 16 }}>
             {[
-              { label: "Total SP", value: totalSP, color: "#e0e0ee", target: currentSprint.velocityTarget },
+              { label: "Total SP", value: totalSP, color: "#e0e0ee", target: currentSprint.velocity_target },
               { label: "Done", value: doneSP, color: "#22c55e" },
               { label: "In Flight", value: inProgressSP, color: "#f0a830" },
               { label: "Completion", value: totalSP > 0 ? Math.round((doneSP / totalSP) * 100) + "%" : "0%", color: "#5b9ff9" },
@@ -396,7 +426,7 @@ export default function SprintTracker({ user }: { user: User }) {
                 <div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: 1.5, color: "#555577", marginBottom: 6 }}>{s.label}</div>
                 <div style={{ fontSize: 22, fontWeight: 700, color: s.color, fontFamily: "'Space Grotesk', sans-serif" }}>
                   {s.value}
-                  {s.target && <span style={{ fontSize: 11, color: "#555577", fontWeight: 400 }}> / {s.target}</span>}
+                  {s.target ? <span style={{ fontSize: 11, color: "#555577", fontWeight: 400 }}> / {s.target}</span> : null}
                 </div>
               </div>
             ))}
@@ -460,7 +490,7 @@ export default function SprintTracker({ user }: { user: User }) {
                         </span>
                       </td>
                       <td style={{ padding: "10px 12px", fontSize: 12, color: "#cccce0", lineHeight: 1.45, fontFamily: "'Space Grotesk', sans-serif", maxWidth: 360 }}>
-                        {task.desc}
+                        {task.description}
                       </td>
                       <td style={{ padding: "10px 12px", textAlign: "center", fontSize: 11, color: "#aaaacc", whiteSpace: "nowrap" }}>
                         {task.assignee || "Unassigned"}
